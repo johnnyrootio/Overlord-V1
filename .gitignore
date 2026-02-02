@@ -1,0 +1,26 @@
+# Local env and secrets — do not commit
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Embedded clone; add as submodule if needed
+multiclaude-src/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

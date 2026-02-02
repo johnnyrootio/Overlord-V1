@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "overlord-agent"
+version = "0.1.0"
+description = "Overlord Agent V1 — stateful multi-agent CLI for greenfield development"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "anthropic>=0.39",
+    "click>=8.0",
+    "langgraph>=0.2",
+    "python-dotenv>=1.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+overlord = "overlord.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "unit: unit tests (fast, isolated)",
+    "integration: integration tests (multi-component, I/O)",
+    "functional: functional tests (CLI subprocess)",
+    "real_multiclaude: integration test requiring gh, multiclaude daemon, API key",
+]
+addopts = "-v --tb=short"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["overlord*"]

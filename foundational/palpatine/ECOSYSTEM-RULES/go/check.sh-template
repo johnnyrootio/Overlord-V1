@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Running Go project gate"
+
+# Format check
+echo "==> Checking formatting with gofmt"
+if ! gofmt -l . | grep -q .; then
+  echo "Code is not formatted. Run: gofmt -w ."
+  exit 1
+fi
+
+# Linting with golangci-lint
+echo "==> Linting with golangci-lint"
+golangci-lint run
+
+# Vet check
+echo "==> Running go vet"
+go vet ./...
+
+# Type checking and build
+echo "==> Building and type checking"
+go build ./...
+
+# Run tests
+echo "==> Running tests"
+go test -v -race -coverprofile=coverage.out ./...
+
+# Show coverage
+echo "==> Test coverage"
+go tool cover -func=coverage.out | tail -1
+
+echo "==> Gate passed!"

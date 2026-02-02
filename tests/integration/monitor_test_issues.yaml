@@ -1,0 +1,14 @@
+# Persistent contrived issues for monitor integration tests.
+# These programming tasks verify workers are actually working and completing tasks.
+# Reused when OVERLORD_MONITOR_TEST_REPO is set.
+
+issues:
+  - title: "[Monitor test] Add src/math.py with add(a,b)"
+    body: |
+      Add a Python module `src/math.py` with a function `add(a, b)` that returns `a + b`.
+      Create the `src` directory if it does not exist.
+      This is a persistent test task for the Overlord monitor.
+  - title: "[Monitor test] Add tests/test_math.py"
+    body: |
+      Add `tests/test_math.py` that tests the `add` function from `src/math.py` using pytest.
+      This is a persistent test task for the Overlord monitor.

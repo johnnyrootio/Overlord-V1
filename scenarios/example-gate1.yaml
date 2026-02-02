@@ -1,0 +1,11 @@
+# Example scenario: Gates 1–5. Use with: overlord scenario <path> [--state-dir DIR]
+# spec_path: path to genesis spec (relative to CWD or absolute)
+# project_id: optional; if omitted, derived from spec basename
+# gate_responses: list of answers fed when Overlord blocks (one per gate)
+spec_path: greenfield-specs/example-todo-app.md
+gate_responses:
+  - "yes"
+  - "yes"
+  - "yes"
+  - "yes"
+  - "yes"

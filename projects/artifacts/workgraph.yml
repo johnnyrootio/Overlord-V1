@@ -1,0 +1,10 @@
+# Work graph (Phase 2 stub)
+waves:
+  - id: wave-1
+    tasks:
+      - id: task-1
+        title: Stub task 1
+        depends_on: []
+      - id: task-2
+        title: Stub task 2
+        depends_on: [task-1]

@@ -1,0 +1,47 @@
+# Phase 2: Work Graph Generation
+
+## Analysis
+
+Looking at the Phase 1 artifacts provided, I have only stub content to work with:
+- **Plan:** "Stub plan for first working V1"
+- **Tasks:** "Stub task 1, Stub task 2"
+
+I don't have access to:
+- `docs/operational-specification.md`
+- `docs/testing-strategy.md`
+- Any contract definitions in `contracts/`
+
+## Issue
+
+I cannot produce a valid work graph without substantive Phase 1 artifacts. The work graph requires:
+
+1. **Operational specification** - to understand system interfaces, components, and behaviors
+2. **Testing strategy** - to properly organize test tasks across all four layers
+3. **Real tasks** - to map into waves with proper dependencies
+4. **Contract definitions** - to reference in Wave 0 interface contract tests
+
+## Requested Action
+
+Please provide the complete Phase 1 artifacts:
+
+1. **specs/plan.md** - Full project plan
+2. **specs/tasks.md** - Detailed task breakdown
+3. **docs/operational-specification.md** - System specification including:
+   - Domain entities
+   - API/CLI interfaces
+   - Data schemas
+   - User workflows
+4. **docs/testing-strategy.md** - Testing approach for all four layers
+5. **contracts/** - Any interface contracts already defined (or indicate none exist yet)
+
+Once I have these, I will produce a complete `workgraph.yml` with:
+- Wave 0: Foundation (interface contract tests referencing `contracts/`, CI/check.sh setup)
+- Wave 1+: Implementation tasks (TDD, depends on interface tests)
+- Integration test tasks
+- Black box test tasks (per operational spec workflows)
+- Documentation/README/quickstart tasks
+- Proper dependency ordering (no implementation before its interface tests)
+
+---
+
+**Status:** Blocked - awaiting complete Phase 1 artifacts

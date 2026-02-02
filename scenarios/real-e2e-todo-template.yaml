@@ -1,0 +1,16 @@
+# Real E2E: trivial todo app with real Claude, real GitHub, real multiclaude.
+# 1. Copy to real-e2e-todo.yaml
+# 2. Replace YOUR_USERNAME with your GitHub username (or use full URL in first response)
+# 3. Prerequisites: gh auth, multiclaude repo init <url>, ANTHROPIC_API_KEY or CLAUDE_CODE_API_KEY
+# 4. Run from repo root: overlord scenario scenarios/real-e2e-todo.yaml
+#
+# If spec_path is relative, run from Overlord repo root. Use absolute path if needed.
+spec_path: greenfield-specs/trivial-todo-app.md
+project_id: trivial-todo-app
+gate_responses:
+  - "YOUR_USERNAME/trivial-todo-app"   # or https://github.com/YOUR_USERNAME/trivial-todo-app
+  - "yes"
+  - "yes"
+  - "yes"
+  - "yes"
+  - "yes"

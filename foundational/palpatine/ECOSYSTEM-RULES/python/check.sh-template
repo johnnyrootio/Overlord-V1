@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Running Python project gate"
+
+# Check if virtual environment is activated (optional but recommended)
+# if [ -z "${VIRTUAL_ENV:-}" ]; then
+#   echo "Warning: Virtual environment not activated"
+# fi
+
+# Linting with ruff
+echo "==> Linting with ruff"
+ruff check .
+
+# Formatting check with black
+echo "==> Checking formatting with black"
+black --check .
+
+# Type checking with mypy
+echo "==> Type checking with mypy"
+mypy src tests
+
+# Run tests with pytest
+echo "==> Running tests with pytest"
+pytest -v --cov=src --cov-report=term-missing
+
+# Security check (optional)
+# echo "==> Security check with bandit"
+# bandit -r src
+
+echo "==> Gate passed!"

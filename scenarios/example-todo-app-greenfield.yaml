@@ -1,0 +1,12 @@
+# P4 C9: First scripted greenfield scenario — example-todo-app with repo name + Gate 1–5 answers.
+# Run: overlord scenario scenarios/example-todo-app-greenfield.yaml [--state-dir DIR]
+# Spec path relative to repo root when run from repo root.
+spec_path: greenfield-specs/example-todo-app.md
+project_id: example-todo-app
+gate_responses:
+  - "example-todo-app"   # repo name (or use full GitHub URL for existing repo)
+  - "yes"
+  - "yes"
+  - "yes"
+  - "yes"
+  - "yes"

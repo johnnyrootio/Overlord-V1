@@ -1,0 +1,23 @@
+# Phase 1: Specifier
+
+I'll begin by internalizing the required documents and then systematically produce the planning artifacts.
+
+## Document Internalization
+
+Per DOCUMENT-INTERNALIZATION, I'm reviewing:
+- **TESTING-STRATEGY**: Four layers required - Interface contracts (Wave 0), Unit/TDD (Wave 1), Integration (Wave 2), **Black box functional (CRITICAL, ongoing)**
+- **SPEC-FIRST-ENFORCEMENT**: Operational spec is source of truth; tests validate, don't drive
+- **PROJECT-REPO-LAYOUT**: Artifacts go to `specs/` and `docs/`; contracts to `contracts/`
+
+---
+
+## Clarification Required
+
+I see you've asked me to begin Phase 1 from the genesis spec, but **no genesis spec content was provided** in your message below the instruction.
+
+To proceed, I need you to provide one of the following:
+
+1. **The genesis spec content** - paste or attach the specification document describing what system we're building
+2. **A path to the genesis spec file** - if it exists in the repository/state
+
+**One question at a time:** What is the system we're specifying? Please provide the genesis spec or describe the intended software.

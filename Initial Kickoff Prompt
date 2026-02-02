@@ -1,0 +1,23 @@
+Prompt: Build Overlord Agent V1 (working first version)
+Goal
+This session should produce a working first version of Overlord per the spec (docs/OVERLORD-AGENT-V1-SPEC.md) and design (docs/DESIGN-AND-ARCHITECTURE.md): CLI, stateful sessions, graph runtime, phase-aligned agents, human-in-the-loop (gates, resume), and integration with multiclaude/scripts. “Working” means we can run it, go through at least one greenfield path (with scripted or real input), persist and resume state, and have tests that give us confidence it behaves as specified.
+Context
+This workspace contains the Overlord Agent V1 bundle: spec, design, and foundational docs under foundational/palpatine/ and foundational/overlord-learnings/. Scripts and greenfield spec format are in scripts/ and greenfield-specs/. We are building Overlord using a traditional Cursor workflow—no Overlord-on-Overlord; I drive the session and you assist.
+How we’ll get there
+Test-driven design
+Drive design and implementation with tests: define desired behavior, write failing tests, then implement until they pass. Prefer behavior-focused tests.
+Integration tests
+Include integration tests that run the system end-to-end (CLI, state, scripted inputs). Cover flows like: start session, advance through phases/gates, persist and resume state, and interaction with scripts/multiclaude (mocked or scripted where needed). Runnable in CI.
+Planning and small chunks
+Start in planning mode: break the work into small, testable chunks (e.g. in PLAN.md or ROADMAP-V1.md). Each chunk should be implementable and verifiable in a few steps. Align with the design and with Cogent-style flow if we have one.
+Deterministic, scripted examples
+Build scripted scenarios where human responses (e.g. phase gate answers) are canned so we can run the same scenario repeatedly and assert on outputs and state. Use a concrete example app (e.g. example-todo-app or a minimal app) as the subject so “Overlord builds X” is what we test.
+First steps
+Skim the bundle and agree where code, tests, and plans live.
+Propose an initial plan (small chunks) that leads to a working V1.
+Propose a first scripted scenario and how we’d encode it for deterministic tests.
+Then iterate: next chunk and tests, implement, keep plan and tests up to date until we have a working first version.
+Constraints
+We are not using Overlord to build Overlord; this is a normal Cursor session.
+Behavior and structure must follow the spec and design; use foundational docs for phase behavior, gates, and multiclaude/script rules.
+If we have a Cogent design flow, we’ll fold those steps into planning and chunking.

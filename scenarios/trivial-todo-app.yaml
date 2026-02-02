@@ -1,0 +1,13 @@
+# P6 C15/C16: First working V1 — trivial todo app (add, list, mark done).
+# Run from repo root: overlord scenario scenarios/trivial-todo-app.yaml [--state-dir DIR]
+# gate_responses: repo name, public/private (when creating), then gate approvals.
+spec_path: greenfield-specs/trivial-todo-app.md
+project_id: trivial-todo-app
+gate_responses:
+  - "trivial-todo-app"   # repo name (or full GitHub URL for existing repo)
+  - "public"             # public or private (when creating new repo)
+  - "yes"
+  - "yes"
+  - "yes"
+  - "yes"
+  - "yes"
