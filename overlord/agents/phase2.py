@@ -12,7 +12,13 @@ try:
 except ImportError:
     yaml = None
 
-from overlord.claude_api import invoke_phase_agent, is_api_configured
+from overlord.claude_api import invoke_phase_agent, invoke_phase_agent_messages, is_api_configured
+from overlord.phase_log import (
+    load_conversation,
+    save_conversation,
+    append_execution_log,
+    ensure_phase_log_paths,
+)
 
 
 def _extract_workgraph_yaml(content: str) -> Optional[str]:
@@ -78,6 +84,10 @@ def run_phase2_wave_planner(
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     paths = dict(artifact_paths or {})
 
+    conv_path, log_path = ensure_phase_log_paths(artifacts_dir, 2)
+    paths["phase_2_conversation"] = conv_path
+    paths["phase_2_execution_log"] = log_path
+
     if system_prompt:
         prompt_file = artifacts_dir / "phase_2_system_prompt.md"
         prompt_file.write_text(system_prompt, encoding="utf-8")
@@ -90,7 +100,7 @@ def run_phase2_wave_planner(
                 "Output valid YAML only with a top-level 'waves' key. Each wave has 'id' and 'tasks'; "
                 "each task has 'id', 'title', 'depends_on' (list of task ids). Phase 3 will parse this to create GitHub issues.\n\n"
             )
-            for key in ("plan", "tasks"):
+            for key in ("plan", "tasks", "operational_specification", "testing_strategy"):
                 path = (artifact_paths or {}).get(key)
                 if path and Path(path).is_file():
                     try:
@@ -100,12 +110,23 @@ def run_phase2_wave_planner(
                     except Exception:
                         pass
             if user_message.count("---") == 0:
-                user_message += "(No plan or tasks files available yet.)\n"
-            response = invoke_phase_agent(2, system_prompt, user_message)
+                user_message += "(No plan, tasks, or foundational docs available yet.)\n"
+            append_execution_log(log_path, 2, "context", "Phase 2 user message (wave planner + plan/tasks)", payload={"user_message_preview": user_message[:500]})
+            messages = load_conversation(conv_path)
+            messages.append({"role": "user", "content": user_message})
+            cwd = str(project_dir)
+            if len(messages) > 1:
+                response = invoke_phase_agent_messages(2, system_prompt, messages, cwd=cwd)
+            else:
+                response = invoke_phase_agent(2, system_prompt, user_message, cwd=cwd)
             if response:
+                messages.append({"role": "assistant", "content": response})
+                save_conversation(conv_path, messages)
                 response_file = artifacts_dir / "phase_2_claude_response.txt"
                 response_file.write_text(response, encoding="utf-8")
                 paths["phase_2_claude_response"] = str(response_file)
+                append_execution_log(log_path, 2, "assistant", "Phase 2 agent response", payload={"response_preview": response[:500]})
+            append_execution_log(log_path, 2, "action", "invoke_phase_agent(2) completed")
 
     workgraph_file = artifacts_dir / "workgraph.yml"
     stub_workgraph = (

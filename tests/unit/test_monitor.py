@@ -10,7 +10,7 @@ def test_gather_status_returns_snapshot():
     snap = gather_status("proj", "/tmp/state", repo_name=None)
     assert isinstance(snap, StatusSnapshot)
     assert snap.workers == []
-    assert snap.health in ("stub", "ok", "daemon_down")
+    assert snap.health in ("stub", "ok", "daemon_down", "repo_not_inited")
 
 
 @pytest.mark.unit

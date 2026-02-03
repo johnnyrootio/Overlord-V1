@@ -1,9 +1,11 @@
 """Overlord CLI — entry point and commands (docs/OVERLORD-CLI-SPEC.md)."""
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
+import time
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -11,21 +13,37 @@ from typing import Any, Dict, Optional, Tuple
 # Suppress urllib3/OpenSSL version warning (common on macOS with system Python)
 warnings.filterwarnings("ignore", module="urllib3")
 
+# Ensure readline is loaded when available (Unix) for proper line editing (arrow keys, backspace, delete)
+try:
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
 import click
 
-from overlord.claude_api import is_api_configured
+from overlord.claude_api import (
+    create_phase_client_sync,
+    create_phase4_client_sync,
+    disconnect_phase4_client,
+    is_api_configured,
+)
 from overlord.graph import invoke_pipeline
+from overlord.prompts import get_monitor_prompt
 from overlord.interactive_phase import PHASE_DONE, run_phase_interactive
 from overlord.monitor import StatusSnapshot, format_snapshot_tables, gather_status
+from overlord.phase_log import ensure_phase_log_paths
 from overlord.multiclaude_recovery import (
     ReconcileResult,
     get_multiclaude_repo_name,
+    is_repo_inited,
     multiclaude_daemon_restart,
     multiclaude_daemon_start,
     multiclaude_daemon_status,
     multiclaude_daemon_stop,
+    get_multiclaude_repo_clone_path,
     multiclaude_remove_repo_clone,
     multiclaude_repo_init,
+    multiclaude_repo_key,
     multiclaude_repo_rm,
     reconcile_issues,
 )
@@ -216,8 +234,11 @@ def _invoke_graph(
     start_phase: int,
     max_phase: Optional[int] = None,
     scripts_dir: Optional[str] = None,
+    message_source: Optional[str] = None,
+    injected_message: Optional[str] = None,
+    phase_4_client: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Run the pipeline from start_phase (graph owns all phase logic). Returns result dict."""
+    """Run the pipeline from start_phase (graph owns all phase logic). Returns result dict. When message_source and injected_message are set (e.g. from monitor or user), Phase 4 uses them. When phase_4_client is set, Phase 4 reuses that long-lived client."""
     return invoke_pipeline(
         project_id=project_id,
         state_root=state_root,
@@ -227,6 +248,9 @@ def _invoke_graph(
         scripts_dir=scripts_dir,
         start_phase=start_phase,
         max_phase=max_phase,
+        message_source=message_source,
+        injected_message=injected_message,
+        phase_4_client=phase_4_client,
     )
 
 
@@ -238,27 +262,56 @@ def _sync_state_from_result(state: SessionState, result: Dict[str, Any]) -> None
         state.repo_url = result["repo_url"]
 
 
+def _safe_input() -> str:
+    """Read a line from stdin. On EOF or Ctrl+C, re-prompt; never exit. Only returns when a line is read."""
+    while True:
+        try:
+            return input().strip()
+        except EOFError:
+            click.echo("(EOF received. Only /exit ends the session. Type /exit to quit.)", err=True)
+        except KeyboardInterrupt:
+            click.echo("(Interrupted. Type /exit to quit.)", err=True)
+
+
+def _session_idle_until_exit(project_id: str) -> None:
+    """
+    Golden rule: only /exit (or /quit) ends the session. Loop until user types /exit or /quit.
+    Use after phases complete or when Phase 0 fails so we never exit prematurely.
+    CLI must never exit on EOF, Ctrl+C, or error—only on explicit /exit.
+    """
+    click.echo("Staying in session. Type /exit to quit.", err=True)
+    while True:
+        line = _safe_input()
+        cmd, _ = parse_slash_command_with_arg(line)
+        if cmd in ("exit", "quit"):
+            click.echo("Exiting. State is saved.")
+            return
+        if line and line.strip():
+            click.echo("Staying in session. Type /exit to quit.", err=True)
+
+
 def _interactive_get_user_input(
     project_id: str,
     state_root: str,
     state: SessionState,
     scripts_dir: str,
     phase: int,
+    verbose_ref: Optional[Dict[str, Any]] = None,
 ):
-    """Return a get_user_input(assistant_text) callable for run_phase_interactive. Handles /done, /exit, /help, /status, /phase, /query."""
+    """Return a get_user_input(assistant_text) callable for run_phase_interactive. Handles /done, /exit, /help, /status, /phase, /query, /verbose, /terse."""
     repo_name = repo_url_to_owner_repo(state.repo_url) if state.repo_url else None
     first_turn = [True]
 
     def get_user_input(assistant_text: str):
-        click.echo(assistant_text)
+        if (assistant_text or "").strip():
+            click.echo(assistant_text)
+        else:
+            click.echo("(Phase agent returned no response. Check Claude Code CLI and API key. Type /exit to quit or type a message to continue.)", err=True)
         if first_turn[0]:
             click.echo("(Type /help for commands, /done when this phase is complete, /exit to quit)", err=True)
             first_turn[0] = False
         while True:
-            try:
-                line = input().strip()
-            except EOFError:
-                return None
+            line = _safe_input()
             cmd, arg = parse_slash_command_with_arg(line)
             if cmd in ("exit", "quit"):
                 click.echo("Exiting. State is saved.")
@@ -282,6 +335,16 @@ def _interactive_get_user_input(
                 continue
             if cmd == "query":
                 return arg or "(no question)"
+            if cmd == "verbose":
+                if verbose_ref is not None:
+                    verbose_ref["verbose"] = True
+                click.echo("(verbose on)", err=True)
+                continue
+            if cmd == "terse":
+                if verbose_ref is not None:
+                    verbose_ref["verbose"] = False
+                click.echo("(terse)", err=True)
+                continue
             if cmd:
                 click.echo(f"(unknown command: /{cmd})", err=True)
                 continue
@@ -301,43 +364,107 @@ def _run_interactive_phases(
     """
     Run human-in-the-loop phases 0, 1, 2 (interactive) then graph phases 3, 4.
     Returns True if completed, False if user exited early.
+    Phase logs (conversation + execution_log) are written from the first interaction.
     """
-    get_user_input = _interactive_get_user_input(pid, root, state, scripts_dir, 0)
+    project_dir = Path(root) / "projects" / pid
+    artifacts_dir = project_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    for phase in (0, 1, 2):
+        conv_path, log_path = ensure_phase_log_paths(artifacts_dir, phase)
+        state.artifact_paths[f"phase_{phase}_conversation"] = conv_path
+        state.artifact_paths[f"phase_{phase}_execution_log"] = log_path
+    manager.save(pid, state)
+
+    verbose_ref: Dict[str, Any] = {"verbose": False}
+    # Pre-connect Phase 0 when not TTY (async path) so first response is faster
+    phase0_client = None
+    if not sys.stdin.isatty() and is_api_configured():
+        phase0_client = create_phase_client_sync(0, pid, root, state.repo_url)
+    get_user_input = _interactive_get_user_input(pid, root, state, scripts_dir, 0, verbose_ref=verbose_ref)
     final0 = run_phase_interactive(
         0, pid, root, state.genesis_spec_path, state.artifact_paths,
         get_user_input=get_user_input,
         repo_url=state.repo_url,
+        artifacts_dir=str(artifacts_dir),
+        verbose_ref=verbose_ref,
+        prewarmed_client=phase0_client,
     )
+    disconnect_phase4_client(phase0_client)
     if final0 is None:
         return False
+    # Overlap: start Phase 1 client connect in background while we do graph + bootstrap write
+    phase1_client_ref: Dict[str, Any] = {"client": None}
+
+    def _warm_phase1() -> None:
+        if is_api_configured():
+            phase1_client_ref["client"] = create_phase_client_sync(1, pid, root, None)
+
+    warm1_thread = threading.Thread(target=_warm_phase1, daemon=True)
+    warm1_thread.start()
     result = _invoke_graph(pid, root, state, start_phase=0, max_phase=0, scripts_dir=scripts_dir)
     _sync_state_from_result(state, result)
     manager.save(pid, state)
 
-    get_user_input = _interactive_get_user_input(pid, root, state, scripts_dir, 1)
+    # Phase 0 → Phase 1 wiring: persist bootstrap deliverable so Phase 1 receives it
+    bootstrap_file = artifacts_dir / "bootstrap_plan.md"
+    bootstrap_file.write_text(final0, encoding="utf-8")
+    state.artifact_paths["bootstrap_plan"] = str(bootstrap_file)
+    manager.save(pid, state)
+
+    warm1_thread.join(timeout=60)  # allow up to 60s for Phase 1 client to connect
+    get_user_input = _interactive_get_user_input(pid, root, state, scripts_dir, 1, verbose_ref=verbose_ref)
     final1 = run_phase_interactive(
         1, pid, root, state.genesis_spec_path, state.artifact_paths,
         get_user_input=get_user_input,
+        artifacts_dir=str(artifacts_dir),
+        verbose_ref=verbose_ref,
+        prewarmed_client=phase1_client_ref.get("client"),
     )
+    disconnect_phase4_client(phase1_client_ref.get("client"))
     if final1 is None:
         return False
-    project_dir = Path(root) / "projects" / pid
-    artifacts_dir = project_dir / "artifacts"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
     plan_file = artifacts_dir / "plan.md"
     tasks_file = artifacts_dir / "tasks.md"
+    operational_spec_file = artifacts_dir / "operational_specification.md"
+    testing_strategy_file = artifacts_dir / "testing_strategy.md"
     plan_file.write_text(final1, encoding="utf-8")
     tasks_file.write_text(final1, encoding="utf-8")
+    operational_spec_file.write_text(final1, encoding="utf-8")
+    testing_strategy_file.write_text(final1, encoding="utf-8")
     state.artifact_paths["plan"] = str(plan_file)
     state.artifact_paths["tasks"] = str(tasks_file)
+    state.artifact_paths["operational_specification"] = str(operational_spec_file)
+    state.artifact_paths["testing_strategy"] = str(testing_strategy_file)
+    # Write same two docs into multiclaude clone docs/ (hyphenated names) so workers can read them
+    if state.repo_url:
+        clone_path = get_multiclaude_repo_clone_path(state.repo_url)
+        if clone_path and os.path.isdir(clone_path):
+            docs_dir = Path(clone_path) / "docs"
+            docs_dir.mkdir(parents=True, exist_ok=True)
+            (docs_dir / "operational-specification.md").write_text(final1, encoding="utf-8")
+            (docs_dir / "testing-strategy.md").write_text(final1, encoding="utf-8")
     state.phase = 1
     manager.save(pid, state)
 
-    get_user_input = _interactive_get_user_input(pid, root, state, scripts_dir, 2)
+    # Overlap: start Phase 2 client connect in background while we prepare for Phase 2
+    phase2_client_ref: Dict[str, Any] = {"client": None}
+
+    def _warm_phase2() -> None:
+        if is_api_configured():
+            phase2_client_ref["client"] = create_phase_client_sync(2, pid, root, None)
+
+    warm2_thread = threading.Thread(target=_warm_phase2, daemon=True)
+    warm2_thread.start()
+    warm2_thread.join(timeout=60)
+    get_user_input = _interactive_get_user_input(pid, root, state, scripts_dir, 2, verbose_ref=verbose_ref)
     final2 = run_phase_interactive(
         2, pid, root, state.genesis_spec_path, state.artifact_paths,
         get_user_input=get_user_input,
+        artifacts_dir=str(artifacts_dir),
+        verbose_ref=verbose_ref,
+        prewarmed_client=phase2_client_ref.get("client"),
     )
+    disconnect_phase4_client(phase2_client_ref.get("client"))
     if final2 is None:
         return False
     workgraph_file = artifacts_dir / "workgraph.yml"
@@ -353,10 +480,277 @@ def _run_interactive_phases(
     state.phase = 2
     manager.save(pid, state)
 
-    result = _invoke_graph(pid, root, state, start_phase=3, max_phase=None, scripts_dir=scripts_dir)
+    # Phase 3 only: emit issues; then Phase 4 runs in execution loop until workgraph complete or /exit
+    result = _invoke_graph(pid, root, state, start_phase=3, max_phase=3, scripts_dir=scripts_dir)
     _sync_state_from_result(state, result)
     manager.save(pid, state)
+    _run_phase4_execution_loop(pid, root, state, manager, scripts_dir)
     return True
+
+
+def _run_monitor_daemon(
+    pid: str,
+    root: str,
+    repo_name: Optional[str],
+    scripts_dir: str,
+    stop_event: threading.Event,
+    request_queue: "queue.Queue[Tuple[str, str]]",
+    status_display_queue: "queue.Queue[str]",
+    status_request_queue: "queue.Queue[Any]",
+    status_response_queue: "queue.Queue[str]",
+    interval_sec: int,
+    quiet_ref: Dict[str, Any],
+) -> None:
+    """
+    Monitor daemon thread: every interval_sec gather multiclaude status, push one line to
+    status_display_queue, and enqueue a (monitor, status_ping) request for the graph runner.
+    When status_request_queue receives a request (e.g. from /status), do full status and put
+    result on status_response_queue. Plain old software (no agent); outputs flow to CLI as status.
+    """
+    last_tick = 0.0
+    while not stop_event.is_set():
+        # Check for /status request (short timeout so we wake often)
+        try:
+            status_request_queue.get(timeout=1)
+            snapshot = gather_status(pid, root, repo_name=repo_name, scripts_dir=scripts_dir)
+            formatted = format_snapshot_tables(snapshot, repo_name=repo_name)
+            status_response_queue.put(formatted)
+        except queue.Empty:
+            pass
+        now = time.time()
+        if now - last_tick >= interval_sec:
+            last_tick = now
+            if not quiet_ref.get("quiet"):
+                try:
+                    snapshot = gather_status(pid, root, repo_name=repo_name, scripts_dir=scripts_dir)
+                    line = (
+                        f"[status] health={snapshot.health} daemon={snapshot.daemon_status} "
+                        f"repo_inited={snapshot.repo_inited} workers={len(snapshot.workers)}"
+                    )
+                    status_display_queue.put(line)
+                except Exception:
+                    pass
+            ping_prompt = get_monitor_prompt("status_ping")
+            if ping_prompt:
+                try:
+                    request_queue.put(("monitor", ping_prompt))
+                except Exception:
+                    pass
+
+
+def _run_graph_runner(
+    pid: str,
+    root: str,
+    state: "SessionState",
+    manager: StateManager,
+    scripts_dir: str,
+    request_queue: "queue.Queue[Tuple[Optional[str], Optional[str]]]",
+    user_reply_queue: "queue.Queue[str]",
+    status_display_queue: "queue.Queue[str]",
+    state_lock: threading.Lock,
+    stop_event: threading.Event,
+    phase_4_client_ref: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Graph runner thread: drain request_queue; for each (source, message) invoke Phase 4 with
+    message_source and injected_message when set; sync state and save; if source is user,
+    put agent reply on user_reply_queue; if source is monitor, optionally put summary on status_display_queue.
+    (None, None) means one default round (no injected message). When phase_4_client_ref is set,
+    creates and reuses a long-lived Phase 4 client for the session.
+    """
+    while not stop_event.is_set():
+        try:
+            item = request_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        source, message = item
+        msg_src: Optional[str] = source if source else None
+        msg_body: Optional[str] = message if message is not None else None
+        if source is not None and message is not None and (message or source == "monitor"):
+            msg_body = (message or "").strip() or msg_body
+        phase_4_client = None
+        if phase_4_client_ref is not None and is_api_configured():
+            if phase_4_client_ref.get("client") is None:
+                with state_lock:
+                    ap = dict(state.artifact_paths)
+                client = create_phase4_client_sync(pid, root, ap)
+                if client is not None:
+                    phase_4_client_ref["client"] = client
+            phase_4_client = phase_4_client_ref.get("client")
+        result = _invoke_graph(
+            pid,
+            root,
+            state,
+            start_phase=4,
+            max_phase=4,
+            scripts_dir=scripts_dir,
+            message_source=msg_src,
+            injected_message=msg_body,
+            phase_4_client=phase_4_client,
+        )
+        with state_lock:
+            _sync_state_from_result(state, result)
+            manager.save(pid, state)
+        if source == "user":
+            response_path = state.artifact_paths.get("phase_4_claude_response")
+            reply_text = ""
+            if response_path and Path(response_path).is_file():
+                try:
+                    reply_text = Path(response_path).read_text(encoding="utf-8", errors="replace").strip()
+                except Exception:
+                    pass
+            try:
+                user_reply_queue.put(reply_text or "(No response captured.)")
+            except Exception:
+                pass
+        elif source == "monitor":
+            try:
+                response_path = state.artifact_paths.get("phase_4_claude_response")
+                if response_path and Path(response_path).is_file():
+                    summary = Path(response_path).read_text(encoding="utf-8", errors="replace").strip()
+                    if len(summary) > 200:
+                        summary = summary[:200] + "..."
+                    status_display_queue.put(f"[monitor] Execution Manager: {summary}")
+            except Exception:
+                pass
+
+
+def _run_phase4_execution_loop(
+    pid: str,
+    root: str,
+    state: "SessionState",
+    manager: StateManager,
+    scripts_dir: str,
+) -> None:
+    """
+    Phase 4 execution loop with monitor daemon and graph runner. Monitor is a separate thread
+    that watches multiclaude and injects status pings into the Execution Manager via the graph.
+    User and monitor messages are serialized through request_queue; /status invokes the monitor
+    for full status; outputs from monitor flow to CLI as status messages.
+    Loop runs until workgraph complete or user types /exit.
+    """
+    repo = repo_url_to_owner_repo(state.repo_url) if state.repo_url else None
+    if not repo:
+        click.echo("No repo_url; cannot run Phase 4 loop. Set repo and run again.", err=True)
+        return
+
+    interval_sec = max(1, int(os.environ.get("OVERLORD_STATUS_INTERVAL_SEC", "60")))
+    stop_event = threading.Event()
+    state_lock = threading.Lock()
+    request_queue: "queue.Queue[Tuple[Optional[str], Optional[str]]]" = queue.Queue()
+    user_reply_queue: "queue.Queue[str]" = queue.Queue()
+    status_display_queue: "queue.Queue[str]" = queue.Queue()
+    status_request_queue: "queue.Queue[Any]" = queue.Queue()
+    status_response_queue: "queue.Queue[str]" = queue.Queue()
+    quiet_ref: Dict[str, Any] = {"quiet": False}
+    verbose_ref: Dict[str, Any] = {"verbose": False}
+    phase_4_client_ref: Dict[str, Any] = {"client": None}
+
+    monitor_thread = threading.Thread(
+        target=_run_monitor_daemon,
+        kwargs={
+            "pid": pid,
+            "root": root,
+            "repo_name": repo,
+            "scripts_dir": scripts_dir,
+            "stop_event": stop_event,
+            "request_queue": request_queue,
+            "status_display_queue": status_display_queue,
+            "status_request_queue": status_request_queue,
+            "status_response_queue": status_response_queue,
+            "interval_sec": interval_sec,
+            "quiet_ref": quiet_ref,
+        },
+        daemon=True,
+    )
+    runner_thread = threading.Thread(
+        target=_run_graph_runner,
+        kwargs={
+            "pid": pid,
+            "root": root,
+            "state": state,
+            "manager": manager,
+            "scripts_dir": scripts_dir,
+            "request_queue": request_queue,
+            "user_reply_queue": user_reply_queue,
+            "status_display_queue": status_display_queue,
+            "state_lock": state_lock,
+            "stop_event": stop_event,
+            "phase_4_client_ref": phase_4_client_ref,
+        },
+        daemon=True,
+    )
+    monitor_thread.start()
+    runner_thread.start()
+
+    try:
+        while True:
+            try:
+                with state_lock:
+                    issues_path = state.artifact_paths.get("issues")
+                    issues_list: list = []
+                    if issues_path and Path(issues_path).is_file():
+                        try:
+                            with open(issues_path, encoding="utf-8") as f:
+                                issues_list = json.load(f)
+                        except Exception:
+                            pass
+                    if issues_list:
+                        r = reconcile_issues(repo, issues_list)
+                        if not r.open_issues:
+                            click.echo("Workgraph complete. All issues closed.")
+                            break
+
+                while True:
+                    try:
+                        line = status_display_queue.get_nowait()
+                        click.echo(line, err=True)
+                    except queue.Empty:
+                        break
+
+                click.echo("Type /exit to quit, /status for full status, or a message for the Execution Manager.", err=True)
+                line = _safe_input()
+                cmd, arg = parse_slash_command_with_arg(line)
+                if cmd in ("exit", "quit"):
+                    click.echo("Exiting Phase 4. State saved.")
+                    break
+                if cmd == "status":
+                    status_request_queue.put(None)
+                    try:
+                        formatted = status_response_queue.get(timeout=30)
+                        click.echo(formatted)
+                    except queue.Empty:
+                        click.echo("(Status request timed out.)", err=True)
+                    continue
+                if cmd == "quiet":
+                    quiet_ref["quiet"] = not quiet_ref["quiet"]
+                    click.echo("Proactive status " + ("off" if quiet_ref["quiet"] else "on"), err=True)
+                    continue
+                if cmd == "verbose":
+                    verbose_ref["verbose"] = True
+                    click.echo("(verbose on)", err=True)
+                    continue
+                if cmd == "terse":
+                    verbose_ref["verbose"] = False
+                    click.echo("(terse)", err=True)
+                    continue
+                if line == "":
+                    request_queue.put((None, None))
+                    continue
+                request_queue.put(("user", line))
+                if verbose_ref.get("verbose"):
+                    click.echo("[Phase 4] Working on your request…", err=True)
+                try:
+                    reply = user_reply_queue.get(timeout=120)
+                    click.echo(reply)
+                except queue.Empty:
+                    click.echo("(Reply timed out.)", err=True)
+    except Exception as e:  # never exit on error—stay in session
+        click.echo(f"Error: {e}", err=True)
+        click.echo("Staying in session. Type /exit to quit.", err=True)
+    finally:
+        stop_event.set()
+        disconnect_phase4_client(phase_4_client_ref.get("client"))
 
 
 @click.group()
@@ -388,6 +782,8 @@ def start(spec_path: str, project_id: Optional[str], state_dir: Optional[str]) -
         if not state.pending_questions and state.phase == 0 and state.repo_url and sys.stdin.isatty():
             if is_api_configured():
                 if not _run_interactive_phases(pid, root, state, manager, scripts_dir):
+                    # User typed /exit during a phase: state already saved in phase; ensure persisted then exit
+                    manager.save(pid, state)
                     return
             else:
                 result = _invoke_graph(pid, root, state, start_phase=0, max_phase=1, scripts_dir=scripts_dir)
@@ -395,6 +791,7 @@ def start(spec_path: str, project_id: Optional[str], state_dir: Optional[str]) -
                 manager.save(pid, state)
             click.echo("Planning and execution ready.")
             click.echo(f"Project: {pid}  step={step_name(state.phase)}" + (f"  Repo: {state.repo_url}" if state.repo_url else ""))
+            _session_idle_until_exit(pid)
             return
         if sys.stdin.isatty():
             while state.pending_questions:
@@ -442,6 +839,7 @@ def start(spec_path: str, project_id: Optional[str], state_dir: Optional[str]) -
                 workers_running = ", ".join(snapshot.workers) if snapshot.workers else "(none)"
                 click.echo(f"[status] workers: {workers_running}  health={snapshot.health}", err=True)
             click.echo(f"Project: {pid}  step={step_name(state.phase)}" + (f"  Repo: {state.repo_url}" if state.repo_url else ""))
+            _session_idle_until_exit(pid)
             return
         click.echo("---")
         click.echo(state.pending_questions[0] if state.pending_questions else "(no pending)")
@@ -454,46 +852,23 @@ def start(spec_path: str, project_id: Optional[str], state_dir: Optional[str]) -
     manager.save(pid, state)
     _echo_project_context(state)
     scripts_dir = _overlord_scripts_dir()
-    # Interactive: ask repo, resolve, multiclaude init, Phase 0 graph, then Phase 1
+    # Interactive: ask repo, resolve, multiclaude init, Phase 0 graph, then Phase 1.
+    # Retry loop so we never exit on error—only /exit can end the session.
     if sys.stdin.isatty():
-        prompt = state.pending_questions[0]
-        click.echo("---")
-        click.echo(prompt)
-        click.echo(f"{step_name(state.phase).capitalize()} – type your answer and press Enter.  (/help for commands, /exit to quit)", err=True)
-        answer = _read_answer(
-            None, state,
-            project_id=pid, state_root=root, repo_url=state.repo_url, scripts_dir=scripts_dir,
-            phase=state.phase,
-        )
-        state.pending_questions.pop(0)
-        if _is_visibility_prompt(prompt) or state.repo_pending_create:
-            owner_repo = state.repo_pending_create or ""
-            if "/" in owner_repo:
-                owner, repo = owner_repo.split("/", 1)
-                public = (answer or "").strip().lower() != "private"
-                created = gh_repo_create(owner, repo, public=public)
-                if created:
-                    state.repo_url = created
-                    click.echo(f"Created repo: {created}")
-                else:
-                    click.echo("Could not create repo (check `gh auth status`).", err=True)
-                state.repo_pending_create = None
-        elif _is_repo_name_or_url_prompt(prompt):
-            url, msg, pending_create = _resolve_repo_from_answer(answer, pid)
-            if pending_create:
-                state.repo_pending_create = f"{pending_create[0]}/{pending_create[1]}"
-                state.pending_questions.insert(0, VISIBILITY_QUESTION)
-                # Ask visibility in the same run so we don't exit
-                prompt = state.pending_questions[0]
-                click.echo("---")
-                click.echo(prompt)
-                click.echo(f"{step_name(state.phase).capitalize()} – type your answer and press Enter.  (/help for commands, /exit to quit)", err=True)
-                answer = _read_answer(
-                    None, state,
-                    project_id=pid, state_root=root, repo_url=state.repo_url, scripts_dir=scripts_dir,
-                    phase=state.phase,
-                )
-                state.pending_questions.pop(0)
+        while True:
+            if not state.pending_questions:
+                state.add_pending_question(REPO_QUESTION)
+            prompt = state.pending_questions[0]
+            click.echo("---")
+            click.echo(prompt)
+            click.echo(f"{step_name(state.phase).capitalize()} – type your answer and press Enter.  (/help for commands, /exit to quit)", err=True)
+            answer = _read_answer(
+                None, state,
+                project_id=pid, state_root=root, repo_url=state.repo_url, scripts_dir=scripts_dir,
+                phase=state.phase,
+            )
+            state.pending_questions.pop(0)
+            if _is_visibility_prompt(prompt) or state.repo_pending_create:
                 owner_repo = state.repo_pending_create or ""
                 if "/" in owner_repo:
                     owner, repo = owner_repo.split("/", 1)
@@ -505,41 +880,87 @@ def start(spec_path: str, project_id: Optional[str], state_dir: Optional[str]) -
                     else:
                         click.echo("Could not create repo (check `gh auth status`).", err=True)
                     state.repo_pending_create = None
-            elif url:
-                state.repo_url = url
-                click.echo(msg)
+            elif _is_repo_name_or_url_prompt(prompt):
+                url, msg, pending_create = _resolve_repo_from_answer(answer, pid)
+                if pending_create:
+                    state.repo_pending_create = f"{pending_create[0]}/{pending_create[1]}"
+                    state.pending_questions.insert(0, VISIBILITY_QUESTION)
+                    # Ask visibility in the same run so we don't exit
+                    prompt = state.pending_questions[0]
+                    click.echo("---")
+                    click.echo(prompt)
+                    click.echo(f"{step_name(state.phase).capitalize()} – type your answer and press Enter.  (/help for commands, /exit to quit)", err=True)
+                    answer = _read_answer(
+                        None, state,
+                        project_id=pid, state_root=root, repo_url=state.repo_url, scripts_dir=scripts_dir,
+                        phase=state.phase,
+                    )
+                    state.pending_questions.pop(0)
+                    owner_repo = state.repo_pending_create or ""
+                    if "/" in owner_repo:
+                        owner, repo = owner_repo.split("/", 1)
+                        public = (answer or "").strip().lower() != "private"
+                        created = gh_repo_create(owner, repo, public=public)
+                        if created:
+                            state.repo_url = created
+                            click.echo(f"Created repo: {created}")
+                        else:
+                            click.echo("Could not create repo (check `gh auth status`).", err=True)
+                        state.repo_pending_create = None
+                elif url:
+                    state.repo_url = url
+                    click.echo(msg)
+                else:
+                    click.echo(msg)
+            manager.save(pid, state)
+            if not state.repo_url:
+                click.echo(f"Repo not set. Fix (e.g. `gh auth login`) and try again, or type /exit to quit.", err=True)
+                state.add_pending_question(REPO_QUESTION)
+                manager.save(pid, state)
+                continue
+            ok, init_msg = multiclaude_repo_init(state.repo_url)
+            if ok:
+                click.echo(_format_repo_init_success(pid, state.repo_url))
             else:
-                click.echo(msg)
-        manager.save(pid, state)
-        if not state.repo_url:
-            click.echo(f"Repo not set. Run `overlord run {pid}` after fixing (e.g. `gh auth login`).", err=True)
-            manager.save(pid, state)
-            raise SystemExit(1)
-        ok, init_msg = multiclaude_repo_init(state.repo_url)
-        if ok:
-            click.echo(_format_repo_init_success(pid, state.repo_url))
-        else:
-            click.echo(init_msg, err=True)
-            hint = _multiclaude_init_error_hint(init_msg)
-            if hint:
-                click.echo(hint, err=True)
-            manager.save(pid, state)
-            raise SystemExit(1)
-        if is_api_configured():
-            if not _run_interactive_phases(pid, root, state, manager, scripts_dir):
-                raise SystemExit(0)
-        else:
-            result = _invoke_graph(pid, root, state, start_phase=0, max_phase=1, scripts_dir=scripts_dir)
-            _sync_state_from_result(state, result)
-            manager.save(pid, state)
-        click.echo("Planning and execution ready.")
-        click.echo(f"Project: {pid}  step={step_name(state.phase)}" + (f"  Repo: {state.repo_url}" if state.repo_url else ""))
-        return
-    # Non-interactive: print repo question and exit
-    click.echo("---")
-    click.echo(state.pending_questions[0])
-    click.echo(f"Setup. Run `overlord run {pid}` (or `overlord resume {pid}`) to answer.", err=True)
-    raise SystemExit(0)
+                click.echo(init_msg, err=True)
+                hint = _multiclaude_init_error_hint(init_msg)
+                if hint:
+                    click.echo(hint, err=True)
+                state.add_pending_question(REPO_QUESTION)
+                manager.save(pid, state)
+                continue
+            # Phase 0: ensure multiclaude repo is inited (verify after init)
+            repo_for_check = repo_url_to_owner_repo(state.repo_url)
+            if repo_for_check:
+                inited, err = is_repo_inited(repo_for_check)
+                if not inited:
+                    click.echo("Multiclaude repo init succeeded but repo not tracked. Retrying init once.", err=True)
+                    ok2, _ = multiclaude_repo_init(state.repo_url)
+                    inited2, _ = is_repo_inited(repo_for_check)
+                    if not inited2:
+                        click.echo(f"Repo still not inited: {err or 'unknown'}. Fix and try again, or type /exit to quit.", err=True)
+                        state.add_pending_question(REPO_QUESTION)
+                        manager.save(pid, state)
+                        continue
+            if is_api_configured():
+                if not _run_interactive_phases(pid, root, state, manager, scripts_dir):
+                    # User typed /exit during a phase: state already saved in phase; ensure persisted then exit
+                    manager.save(pid, state)
+                    return
+            else:
+                result = _invoke_graph(pid, root, state, start_phase=0, max_phase=1, scripts_dir=scripts_dir)
+                _sync_state_from_result(state, result)
+                manager.save(pid, state)
+            click.echo("Planning and execution ready.")
+            click.echo(f"Project: {pid}  step={step_name(state.phase)}" + (f"  Repo: {state.repo_url}" if state.repo_url else ""))
+            _session_idle_until_exit(pid)
+            return
+    else:
+        # Non-interactive: print repo question and exit (only when stdin is not a TTY)
+        click.echo("---")
+        click.echo(state.pending_questions[0])
+        click.echo(f"Setup. Run `overlord run {pid}` (or `overlord resume {pid}`) to answer.", err=True)
+        raise SystemExit(0)
 
 
 @cli.command("list")
@@ -663,7 +1084,7 @@ def _read_answer(
         status_thread.start()
     try:
         while True:
-            line = input().strip()
+            line = _safe_input()
             cmd, arg = parse_slash_command_with_arg(line)
             if cmd:
                 if cmd in ("exit", "quit"):
@@ -793,7 +1214,22 @@ def _handle_pending_or_continue(
             hint = _multiclaude_init_error_hint(init_msg)
             if hint:
                 click.echo(hint, err=True)
-            raise SystemExit(1)
+            state.add_pending_question(REPO_QUESTION)
+            manager.save(project_id, state)
+            click.echo(f"Fix and run `overlord run {project_id}` again, or type /exit to quit.", err=True)
+            return
+        # Phase 0: ensure multiclaude repo is inited (verify after init)
+        repo_for_check = repo_url_to_owner_repo(state.repo_url)
+        if repo_for_check:
+            inited, err = is_repo_inited(repo_for_check)
+            if not inited:
+                ok2, _ = multiclaude_repo_init(state.repo_url)
+                inited2, _ = is_repo_inited(repo_for_check)
+                if not inited2:
+                    click.echo(f"Repo still not inited: {err or 'unknown'}. Fix and run `overlord run {project_id}` again, or type /exit to quit.", err=True)
+                    state.add_pending_question(REPO_QUESTION)
+                    manager.save(project_id, state)
+                    return
         result = _invoke_graph(project_id, state_root, state, start_phase=0, max_phase=1, scripts_dir=scripts_dir)
         _sync_state_from_result(state, result)
         manager.save(project_id, state)
@@ -956,11 +1392,13 @@ def worker_cmd() -> None:
 @click.argument("worker_name", type=str)
 @click.option("--yes", "yes_flag", is_flag=True, help="Non-interactive: accept cleanup prompt (unpushed commits).")
 def worker_rm(repo_name: str, worker_name: str, yes_flag: bool) -> None:
-    """Remove a multiclaude worker (kills tmux window, removes worktree, unregisters). Use when a worker is stuck or done but still running."""
+    """Remove a multiclaude worker (kills tmux window, removes worktree, unregisters). Use when a worker is stuck or done but still running.
+    repo_name can be owner/repo; multiclaude expects short name (multiclaude_repo_key)."""
+    mc_repo = multiclaude_repo_key(repo_name) or repo_name
     try:
         stdin_input = b"y\n" if yes_flag else None
         result = subprocess.run(
-            ["multiclaude", "worker", "rm", worker_name, "--repo", repo_name],
+            ["multiclaude", "worker", "rm", worker_name, "--repo", mc_repo],
             input=stdin_input,
             timeout=30,
         )
@@ -977,10 +1415,12 @@ def worker_rm(repo_name: str, worker_name: str, yes_flag: bool) -> None:
 @worker_cmd.command("list")
 @click.argument("repo_name", type=str)
 def worker_list(repo_name: str) -> None:
-    """List multiclaude workers for a repo (runs multiclaude worker list --repo <repo>)."""
+    """List multiclaude workers for a repo (runs multiclaude worker list --repo <repo>).
+    repo_name can be owner/repo; multiclaude expects short name (multiclaude_repo_key)."""
+    mc_repo = multiclaude_repo_key(repo_name) or repo_name
     try:
         subprocess.run(
-            ["multiclaude", "worker", "list", "--repo", repo_name],
+            ["multiclaude", "worker", "list", "--repo", mc_repo],
             timeout=10,
         )
     except FileNotFoundError:
@@ -1034,9 +1474,10 @@ def multiclaude_status_cmd(repo_name: str, state_dir: Optional[str]) -> None:
     if not script.exists():
         click.echo(f"Script not found: {script}", err=True)
         raise SystemExit(2)
+    mc_repo = multiclaude_repo_key(repo_name) or repo_name
     try:
         result = subprocess.run(
-            [str(script), repo_name],
+            [str(script), mc_repo],
             cwd=Path(scripts_dir).parent,
             timeout=30,
         )
@@ -1110,11 +1551,12 @@ def reconcile_cmd(
         click.echo(f"  #{(i.get('number'))} {(i.get('title') or '')[:50]}")
     if cleanup_stuck and r.workers_running:
         scripts_dir = _overlord_scripts_dir()
+        mc_repo = multiclaude_repo_key(repo) or repo
         for w in r.workers_running:
             click.echo(f"Removing worker: {w}")
             stdin_input = b"y\n" if yes_flag else None
             subprocess.run(
-                ["multiclaude", "worker", "rm", w, "--repo", repo],
+                ["multiclaude", "worker", "rm", w, "--repo", mc_repo],
                 input=stdin_input,
                 timeout=30,
             )

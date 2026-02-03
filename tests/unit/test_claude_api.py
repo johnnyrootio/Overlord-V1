@@ -1,4 +1,4 @@
-"""Unit tests: Claude API phase agent invocation (overlord/claude_api.py). C11."""
+"""Unit tests: Claude API phase agent invocation (overlord/claude_api.py). C11. Uses Claude Agent SDK (Claude Code)."""
 import os
 
 import pytest
@@ -65,7 +65,7 @@ def test_invoke_phase_agent_returns_empty_with_empty_key():
 
 @pytest.mark.unit
 def test_invoke_phase_agent_returns_non_empty_when_configured():
-    """Verify Claude Code API works: call API with simple prompt, assert non-empty response. Requires ANTHROPIC_API_KEY."""
+    """Verify Claude Agent SDK (Claude Code) works: call with simple prompt, assert non-empty response. Requires ANTHROPIC_API_KEY and Claude Code CLI (Python 3.10+)."""
     _require_api_key()
     system_prompt = "You are a helpful assistant. Reply in one short sentence."
     user_message = "Say exactly: API verification passed."

@@ -11,8 +11,15 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from overlord.prompts import get_phase_system_prompt
-from overlord.claude_api import invoke_phase_agent, is_api_configured
+from overlord.claude_api import invoke_phase_agent, invoke_phase_agent_messages, is_api_configured
+from overlord.multiclaude_recovery import get_multiclaude_repo_clone_path
 from overlord.repo_utils import repo_url_to_owner_repo
+from overlord.phase_log import (
+    load_conversation,
+    save_conversation,
+    append_execution_log,
+    ensure_phase_log_paths,
+)
 from overlord.agents.phase1 import run_phase1_specifier
 from overlord.agents.phase2 import run_phase2_wave_planner
 from overlord.agents.phase3 import emit_issues
@@ -71,6 +78,9 @@ def _phase_0_stub(state: Dict[str, Any]) -> Dict[str, Any]:
             pass
 
         # C11: When Claude Code API is configured, spawn one Phase 0 instance
+        conv_path, log_path = ensure_phase_log_paths(artifacts_dir, 0)
+        artifact_paths["phase_0_conversation"] = conv_path
+        artifact_paths["phase_0_execution_log"] = log_path
         if is_api_configured() and prompt_text:
             user_message = "Begin Phase 0 (Bootstrap). "
             repo_url = state.get("repo_url")
@@ -82,11 +92,27 @@ def _phase_0_stub(state: Dict[str, Any]) -> Dict[str, Any]:
                     user_message += Path(genesis_spec_path).read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     user_message += "(genesis spec not readable)\n"
-            response = invoke_phase_agent(0, prompt_text, user_message)
+            append_execution_log(log_path, 0, "context", "Phase 0 user message (bootstrap + genesis spec)", payload={"user_message_preview": user_message[:500]})
+            messages = load_conversation(conv_path)
+            messages.append({"role": "user", "content": user_message})
+            cwd = str(project_dir)
+            # Run in repo clone when available so agent can create bootstrap files directly
+            if repo_url:
+                clone_path = get_multiclaude_repo_clone_path(repo_url)
+                if clone_path and os.path.isdir(clone_path):
+                    cwd = clone_path
+            if len(messages) > 1:
+                response = invoke_phase_agent_messages(0, prompt_text, messages, cwd=cwd)
+            else:
+                response = invoke_phase_agent(0, prompt_text, user_message, cwd=cwd)
             if response:
+                messages.append({"role": "assistant", "content": response})
+                save_conversation(conv_path, messages)
                 response_file = artifacts_dir / "phase_0_claude_response.txt"
                 response_file.write_text(response, encoding="utf-8")
                 artifact_paths["phase_0_claude_response"] = str(response_file)
+                append_execution_log(log_path, 0, "assistant", "Phase 0 agent response", payload={"response_preview": response[:500]})
+            append_execution_log(log_path, 0, "action", "invoke_phase_agent(0) completed")
 
         artifact_file = artifacts_dir / "phase_0_done.txt"
         artifact_file.write_text("phase_0_done\n")
@@ -159,6 +185,7 @@ def _phase_3_node(state: Dict[str, Any]) -> Dict[str, Any]:
     )
     project_dir = Path(state_root) / "projects" / project_id
     artifact_paths["issues"] = str(project_dir / "issues.json")
+    artifact_paths["phase_3_execution_log"] = str(project_dir / "artifacts" / "phase_3_execution_log.jsonl")
     out = {**state, "phase": 3, "artifact_paths": artifact_paths}
     if state.get("repo_url"):
         out["repo_url"] = state["repo_url"]
@@ -166,7 +193,7 @@ def _phase_3_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _phase_4_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Phase 4 (Execution Manager): dispatch workers, monitor."""
+    """Phase 4 (Execution Manager): dispatch workers, monitor. Accepts optional message_source and injected_message from monitor/user. When phase_4_client is set, reuses long-lived client."""
     project_id = state.get("project_id", "")
     state_root = state.get("state_root") or ""
     artifact_paths = dict(state.get("artifact_paths") or {})
@@ -174,6 +201,9 @@ def _phase_4_node(state: Dict[str, Any]) -> Dict[str, Any]:
     repo_name = repo_url_to_owner_repo(repo_url) if repo_url else None
     scripts_dir = state.get("scripts_dir") or _scripts_dir()
     system_prompt = get_phase_system_prompt(4) or ""
+    message_source = state.get("message_source")  # "user" | "monitor" | None
+    injected_message = state.get("injected_message")
+    phase_4_client = state.get("phase_4_client")
     result = run_phase4_execution_manager(
         project_id=project_id,
         state_root=state_root,
@@ -182,6 +212,9 @@ def _phase_4_node(state: Dict[str, Any]) -> Dict[str, Any]:
         repo_name=repo_name,
         repo_url=repo_url,
         scripts_dir=scripts_dir,
+        message_source=message_source,
+        injected_message=injected_message,
+        phase_4_client=phase_4_client,
     )
     out = {**state, "phase": 4, "artifact_paths": result.get("artifact_paths") or artifact_paths}
     if state.get("repo_url"):
@@ -248,10 +281,16 @@ def invoke_pipeline(
     scripts_dir: Optional[str] = None,
     start_phase: int = 0,
     max_phase: Optional[int] = None,
+    message_source: Optional[str] = None,
+    injected_message: Optional[str] = None,
+    phase_4_client: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Single entry point for the CLI: run the pipeline from start_phase until END or max_phase.
     State is passed in; result dict has phase, artifact_paths, repo_url. Graph owns all phase logic.
+    When message_source and injected_message are set (e.g. from monitor or user), Phase 4 uses
+    them instead of the default "Begin Phase 4..." message so the agent can distinguish monitor vs user.
+    When phase_4_client is set, Phase 4 reuses that long-lived client instead of creating one per turn.
     """
     graph = build_graph()
     config = {"configurable": {"thread_id": project_id}}
@@ -268,4 +307,10 @@ def invoke_pipeline(
         initial["max_phase"] = max_phase
     if scripts_dir:
         initial["scripts_dir"] = scripts_dir
+    if message_source is not None:
+        initial["message_source"] = message_source
+    if injected_message is not None:
+        initial["injected_message"] = injected_message
+    if phase_4_client is not None:
+        initial["phase_4_client"] = phase_4_client
     return graph.invoke(initial, config=config)

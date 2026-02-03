@@ -20,7 +20,8 @@ SLASH_HELP = (
     "  /query [question] – ask about execution state (during Phase 4) or send to agent (during phase)\n"
     "  /done   – mark current phase complete; agent outputs final deliverable\n"
     "  /quiet  – toggle proactive status lines off\n"
-    "  /verbose – toggle verbose output\n"
+    "  /verbose – turn on progress messages\n"
+    "  /terse   – turn off progress messages\n"
     "  /exit   – stop this project's workers, save state, exit\n"
     "Anything else is ad hoc conversation: your message goes to the phase agent."
 )
@@ -58,7 +59,7 @@ def handle_slash_command(
     query_arg: str = "",
 ) -> Tuple[str, bool, bool]:
     """
-    Handle /status, /phase, /help, /query, /quiet, /verbose. (/exit, /done handled in CLI.)
+    Handle /status, /phase, /help, /query, /quiet, /verbose, /terse. (/exit, /done handled in CLI.)
     Returns (output_line, new_quiet, new_verbose).
     """
     if cmd == "status":
@@ -80,5 +81,7 @@ def handle_slash_command(
     if cmd == "quiet":
         return "(quiet toggled)", not quiet, verbose
     if cmd == "verbose":
-        return "(verbose toggled)", quiet, not verbose
+        return "(verbose on)", quiet, True
+    if cmd == "terse":
+        return "(terse)", quiet, False
     return f"(unknown slash command: /{cmd})", quiet, verbose

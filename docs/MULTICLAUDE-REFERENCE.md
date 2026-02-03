@@ -36,13 +36,17 @@ This document summarizes **multiclaude** (source: `multiclaude-src/`, cloned fro
 - **worker** – One task, one branch, one PR; signals `multiclaude agent complete`. Ephemeral.
 - **review** – Reviews a specific PR. Ephemeral.
 
+## Repo key: short name (last path segment)
+
+Multiclaude keys repos by **short name** (last path segment of the GitHub URL), not `owner/repo`. For `multiclaude repo init https://github.com/owner/repo-name`, the stored key is `repo-name`. Commands that take `--repo` (e.g. `worker list --repo`, `worker rm --repo`) expect this same key. Overlord passes `owner/repo` in state; when calling the multiclaude CLI it uses `multiclaude_repo_key(owner/repo)` → short name.
+
 ## CLI Commands Overlord Uses
 
 - `multiclaude start` / `daemon status` / `daemon logs -f`
-- `multiclaude repo init <url>` – Track repo; creates tmux session, supervisor, merge-queue or pr-shepherd, default workspace.
-- `multiclaude worker create "<task>"` (optionally `--repo <name>`, `--branch`, `--push-to`) – Create worktree, tmux window, start Claude with worker prompt, register with daemon.
-- `multiclaude worker list` – List workers (from daemon/state).
-- `multiclaude worker rm <name>` – Remove worker.
+- `multiclaude repo init <url>` – Track repo; creates tmux session, supervisor, merge-queue or pr-shepherd, default workspace. Repo is stored under short name (last path segment of URL).
+- `multiclaude worker create "<task>"` (optionally `--repo <name>`, `--branch`, `--push-to`) – `<name>` = short name. Create worktree, tmux window, start Claude with worker prompt, register with daemon.
+- `multiclaude worker list --repo <name>` – `<name>` = short name. List workers (from daemon/state).
+- `multiclaude worker rm <name> --repo <repo>` – Remove worker. `<repo>` = short name.
 - `multiclaude message send <to> "msg"` – Send message to agent (creates file in that agent’s inbox).
 - `multiclaude agent attach <name> [--read-only]` – Attach to agent’s tmux window.
 - `multiclaude agent complete` – Used by worker to signal done (daemon marks ready_for_cleanup).

@@ -22,7 +22,7 @@ def test_handle_slash_status_returns_snapshot_info():
     state = SessionState(project_id="x")
     snapshot = StatusSnapshot(health="ok", workers=["w1"], liveness="ok")
     out, _, _ = handle_slash_command("status", state, snapshot)
-    assert "health=" in out and "workers=" in out and "liveness=" in out
+    assert "health=" in out and "liveness=" in out and ("workers" in out or "workers=" in out)
 
 
 @pytest.mark.unit
@@ -43,3 +43,23 @@ def test_handle_slash_help_lists_commands():
     snapshot = StatusSnapshot()
     out, _, _ = handle_slash_command("help", state, snapshot)
     assert "/status" in out and "/phase" in out and "/help" in out
+
+
+@pytest.mark.unit
+def test_handle_slash_verbose_sets_verbose_true():
+    """handle_slash_command /verbose returns message and new_verbose=True."""
+    state = SessionState(project_id="x")
+    snapshot = StatusSnapshot()
+    out, new_quiet, new_verbose = handle_slash_command("verbose", state, snapshot, verbose=False)
+    assert "verbose" in out.lower()
+    assert new_verbose is True
+
+
+@pytest.mark.unit
+def test_handle_slash_terse_sets_verbose_false():
+    """handle_slash_command /terse returns message and new_verbose=False."""
+    state = SessionState(project_id="x")
+    snapshot = StatusSnapshot()
+    out, new_quiet, new_verbose = handle_slash_command("terse", state, snapshot, verbose=True)
+    assert "terse" in out.lower()
+    assert new_verbose is False

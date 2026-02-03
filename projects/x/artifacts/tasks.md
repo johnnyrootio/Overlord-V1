@@ -1,34 +1,26 @@
-# Phase 1: Specification and Planning
+# Phase 1: Specifier — Beginning Analysis
 
-I'll now analyze the genesis spec and produce the required Phase 1 artifacts. Let me start by internalizing the source documents and understanding the project scope.
+I'll begin by re-reading the foundational documents to ensure proper internalization before proceeding.
 
 ## Document Internalization Complete
 
-Per DOCUMENT-INTERNALIZATION, I have reviewed:
-- TESTING-STRATEGY: Four layers with Layer 4 (black box) as CRITICAL
-- SPEC-FIRST-ENFORCEMENT: Operational spec drives implementation, tests validate
-- PROJECT-REPO-LAYOUT: Prescribed directory structure for specs/, docs/, contracts/
+Per DOCUMENT-INTERNALIZATION, I've identified the following key requirements:
+
+1. **TESTING-STRATEGY**: Four layers with Layer 4 (black box) as **CRITICAL**
+2. **SPEC-FIRST-ENFORCEMENT**: Operational spec is source of truth; tests validate, don't drive
+3. **PROJECT-REPO-LAYOUT**: Mandatory structure with specs/, docs/, contracts/
 
 ---
 
-## Initial Analysis
+## First Question: Genesis Spec Location
 
-I see the genesis spec file path is referenced but the content wasn't provided in your message. 
+I notice you mentioned "the genesis spec below" but no genesis spec content was provided in your message.
 
-**Question 1 (Scope):**
+**Question:** Could you please provide the genesis spec content (either paste it directly or provide the file path where I can access it)?
 
-Before I can produce the constitution, plan, specify, and tasks artifacts, I need to see the genesis specification. Could you please provide:
-
-1. The content of the genesis spec (either paste it directly or confirm the file path so I can read it), OR
-2. A brief description of what system/project we're specifying
-
-Once I have the genesis spec content, I'll proceed with:
-- Clarifying questions (one at a time)
-- Constitution (goals, principles, non-negotiables)
-- Plan (phases, milestones)
-- Specify (refined specification)
-- Tasks (complete task list including implementation, tests, documentation, contracts)
-- Operational specification (source of truth for behavior)
-- Testing strategy (four layers with black box CRITICAL)
-
-What is the project we're building?
+Once I have the genesis spec, I'll:
+1. Summarize the intent and scope
+2. Ask clarifying questions one at a time
+3. Produce the mandatory artifacts (constitution, plan, specify, tasks, operational-specification, testing-strategy)
+4. Ensure all interfaces have prescribed contracts
+5. Include tasks for the complete runnable system (implementation, tests, docs, quickstarts, run scripts)

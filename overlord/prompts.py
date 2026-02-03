@@ -34,6 +34,21 @@ def get_agent_prompts_dir() -> Path:
     return _repo_root() / "agent_prompts"
 
 
+def get_monitor_prompt(name: str) -> str:
+    """
+    Load a monitor interrogation prompt from agent_prompts/monitor/<name>.md.
+    Used when the monitor daemon injects messages into the Execution Manager (e.g. status_ping, full_status).
+    Returns file contents if present, else empty string.
+    """
+    path = get_agent_prompts_dir() / "monitor" / f"{name}.md"
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
 def load_phase_system_prompt(phase: int) -> str:
     """
     Load the system prompt for the given phase from agent_prompts/phase_N_*.md.

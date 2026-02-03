@@ -1,0 +1,15 @@
+waves:
+  - id: wave0
+    name: foundation
+    tasks:
+      - id: T0.1
+        title: "Placeholder: Phase 1 must complete first"
+        depends_on: []
+
+  - id: wave1
+    name: core
+    tasks:
+      - id: T1.1
+        title: "Placeholder: Awaiting Phase 1 artifacts"
+        depends_on:
+          - T0.1

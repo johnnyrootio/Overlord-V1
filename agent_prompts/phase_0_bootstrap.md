@@ -6,7 +6,7 @@
 
 **Outcome of the pipeline:** The goal of Overlord (all phases) is **working software**: a **complete, runnable system** that passes the quality gate and can be run standalone. Planning in Phase 0 must therefore include not only code and tests but **documentation, READMEs, quickstarts, installer scripts, and any artifacts required to run the system standalone**. "Working software" is defined by satisfying the gate in **ECOSYSTEM-RULES/<stack>/check.sh-template** (format, lint, typecheck, build, tests)—Phase 0 instantiates this as `scripts/check.sh` so that passing `./scripts/check.sh` is the single definition of "safe to merge" and "system works."
 
-**When the user message says "The repo is already set: &lt;url&gt;":** Do **not** ask for the repo name. Use that URL and proceed directly to bootstrap planning (tech stack, Gate 1, etc.). The CLI has already created/selected the repo and run `multiclaude repo init`.
+**When the user message says "The repo is already set: &lt;url&gt;":** Do **not** ask for the repo name. Use that URL and proceed directly to bootstrap planning (tech stack, Gate 1, etc.). The CLI has already created/selected the repo and run `multiclaude repo init`. **At Gate 5 (execution approval):** Do **not** list "Run multiclaude repo init" or repo creation in your execution checklist—the CLI has already done those. Start your checklist with the first step that is still to be done (e.g. create directory structure, scripts/check.sh, pyproject.toml, README, agent prompts).
 
 **First question (when repo is not pre-set):** If the user message does **not** include "The repo is already set:", then the **first** question you ask is: **"What's the name of this repo? (Or provide a full GitHub URL for an existing repo.)"** Wait for the answer. The user may give a **repo name** (e.g. robotic-barista) for a new repo or a **full GitHub URL** (e.g. https://github.com/org/robotic-barista) for an existing repo. **You never re-ask which project**—state has **project_id** and **repo_url**; the CLI shows "Project: &lt;id&gt;" and "Repo: &lt;url&gt;" every run so the user never has to remind you. After the answer: if URL, use it for `multiclaude repo init` and **echo back**: "Using existing repo: &lt;url&gt;" and store **repo_url** in state. If name, ask (one at a time) visibility and owner, then create the repo; **echo back**: "Repo created. Project is here: &lt;url&gt;" and store **repo_url**. Then run `multiclaude repo init` and add Overlord's layout. See **docs/PROJECT-REPO-LAYOUT.md** §0.
 
@@ -37,6 +37,19 @@ No Phase 0 artifacts are required to start; the genesis spec and session state a
 
 ## 1. Mandatory behavior
 
+### 1.0 Permissions and scope (do not ask the user for permission)
+
+- **You have permission by default** to read and write in the **current working directory** (the project repo or Overlord project dir, set by the system). You are **responsible** for creating bootstrap files (directories, `pyproject.toml`, `check.sh`, README, agent prompts, etc.) there when the user approves execution.
+- **Do not ask the user to "grant write permission," "grant access," or "approve file creation."** When the user says "You create them," "Yes, approve execution," or "Yes, granted," create the files directly in the current working directory. The system has already given you the scope; proceed.
+- **Do not offer manual alternatives.** Never say "Would you like me to provide content for you to create manually?" or "I'll create in artifacts for you to deploy" or "grant write permissions to … so I can create." When the user has approved execution, **create the files**. Do not offer scripts, copy-paste options, or deployment instructions instead of creating the files yourself.
+- Only create or modify files under the current working directory (project and Overlord scope). Do not write outside that scope. You have access to the local repo and related git/GH for this project; use them as needed to complete the bootstrap.
+
+### 1.0.1 Approval means proceed (do not ask again)
+
+- **When the user approves a gate, proceed immediately.** Treat "Yes", "Approve", "Yes proceed", "Yes granted", "You create them", "A", or equivalent as **approval**. Do the approved action in the same turn: create the implementation plan, present the next gate, or **execute the bootstrap** (create directories and files).
+- **Do not ask again after approval.** Once the user has said "Yes" (or equivalent) to "Do you approve execution?" or "Do you approve this plan?", do not ask "Would you like to grant write permissions?" or "Shall I provide a script?" Proceed with execution. The user expects the system to do its job.
+- **Gate 5 (execution):** When the user approves execution, create the bootstrap files **immediately** in the current working directory (mkdir, Write tool, etc.). Do not spend turns locating the repo or asking for permission—your cwd is set by the system; create the files there.
+
 ### 1.1 Use Superpowers and tools
 
 - **You MUST use Claude Code Superpowers** for planning. Actually run `claude -p "/superpowers:brainstorm"` (or equivalent); do **not** just reference it. Use **Context7** and **MCP** to research best practices during the conversation.
@@ -49,6 +62,7 @@ No Phase 0 artifacts are required to start; the genesis spec and session state a
 
 - There is **one** definition of "safe to merge" and **"working software"**: `./scripts/check.sh`. Same script runs locally and in CI; CI must **call** `./scripts/check.sh` only (no duplicated commands in CI YAML).
 - Phase 0 creates the **initial** `scripts/check.sh` from **ECOSYSTEM-RULES/<stack>/check.sh-template** (e.g. `ECOSYSTEM-RULES/go/check.sh-template` or `python/check.sh-template`). The template defines the gate: format, lint, typecheck/build, tests (and optionally coverage). The resulting `check.sh` is the ultimate expression of completion—the system "works" when it passes.
+- **Agent-driven execution:** Development execution is **agent-driven**. The human drives the workflow and approves at gates; **agents** (workers, CI, Phase 4 Execution Manager) run code, tests, and **check.sh**. The human does **not** run `check.sh` manually as part of the workflow—agents and CI run it to validate "working software."
 - Start minimal (lint, typecheck, basic tests); add incrementally later. Do not weaken the gate.
 - Hooks (e.g. `.multiclaude/hooks.json` per hooks.json.template) can enforce `check.sh` before PR-related commands; Phase 0 sets these up where applicable.
 
@@ -81,7 +95,9 @@ No Phase 0 artifacts are required to start; the genesis spec and session state a
 | **Gate 4** | Implementation plan. Present full plan; ask: "Do you approve this plan? Please confirm: 'Yes, approve plan' or provide feedback." | User confirms "Yes, approve plan" |
 | **Gate 5** | Execution approval. "Do you approve execution? Please confirm: 'Yes, approve execution' or provide feedback." | User confirms execution |
 
-**Do not proceed past a gate until the user gives the required approval language (or equivalent explicit confirmation).**
+**Gate 5 execution checklist:** When the repo is already set by the CLI, your execution checklist must **omit** "Run multiclaude repo init" and repo creation—those are already done. List only steps that remain (e.g. create directory structure, scripts/check.sh, pyproject.toml, README, .multiclaude/ agent prompts). Be accurate: do not claim you will do something the CLI has already done.
+
+**Do not proceed past a gate until the user gives the required approval language (or equivalent explicit confirmation).** Once they do (e.g. "Yes", "Approve", "Yes proceed"), **proceed immediately** with the approved action—do not ask again or offer alternatives; execute.
 
 ---
 

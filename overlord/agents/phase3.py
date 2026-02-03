@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from overlord.repo_utils import repo_url_to_owner_repo
+from overlord.phase_log import append_execution_log, ensure_phase_log_paths
 
 try:
     import yaml
@@ -90,7 +91,7 @@ def _build_labels(task: Dict[str, Any]) -> List[str]:
 
 
 def _build_body(task: Dict[str, Any], task_id_to_issue_number: Dict[str, int]) -> str:
-    """Build issue body (Markdown) with header, Depends on #N, and sections from task."""
+    """Build issue body (Markdown) with header, Depends on #N, foundational context, and sections from task."""
     lines = []
     task_type = (task.get("type") or "implementation").strip().capitalize()
     wave_index = task.get("_wave_index", 0)
@@ -104,6 +105,11 @@ def _build_body(task: Dict[str, Any], task_id_to_issue_number: Dict[str, int]) -
     issue_nums = [task_id_to_issue_number[d] for d in deps if d in task_id_to_issue_number]
     if issue_nums:
         lines.append("**Depends on**: " + ", ".join(f"#{n}" for n in sorted(issue_nums)))
+    lines.append("")
+    # Foundational context for implementers (operational spec and testing strategy in target repo)
+    lines.append("### Foundational context")
+    lines.append("")
+    lines.append("Implement per **docs/operational-specification.md**; validate per **docs/testing-strategy.md**.")
     lines.append("")
     # Title as section
     title = task.get("title") or "Task"
@@ -217,6 +223,9 @@ def emit_issues(
     project_dir = Path(state_root) / "projects" / project_id
     project_dir.mkdir(parents=True, exist_ok=True)
     issues_file = project_dir / "issues.json"
+    artifacts_dir = project_dir / "artifacts"
+    _, log_path = ensure_phase_log_paths(artifacts_dir, 3)
+    append_execution_log(log_path, 3, "action", "emit_issues started", payload={"work_graph_path": work_graph_path})
 
     repo = repo_url_to_owner_repo(repo_url) if repo_url else None
     if not repo and repo_name and "/" in str(repo_name):
@@ -228,6 +237,7 @@ def emit_issues(
     workgraph = _load_workgraph(work_graph_path)
     if not workgraph:
         # Stub: no work graph
+        append_execution_log(log_path, 3, "action", "emit_issues stub (no work graph)", payload={"work_graph_path": work_graph_path})
         stub_issues = [
             {"task_id": "stub-1", "number": 1, "title": "stub-issue-1"},
             {"task_id": "stub-2", "number": 2, "title": "stub-issue-2"},
@@ -238,6 +248,7 @@ def emit_issues(
 
     tasks = _tasks_in_order(workgraph)
     if not tasks:
+        append_execution_log(log_path, 3, "action", "emit_issues stub (no tasks)", payload={"work_graph_path": work_graph_path})
         stub_issues = [{"task_id": "stub-1", "number": 1, "title": "No tasks"}]
         with open(issues_file, "w", encoding="utf-8") as f:
             json.dump(stub_issues, f, indent=2)
@@ -277,4 +288,8 @@ def emit_issues(
     with open(issues_file, "w", encoding="utf-8") as f:
         json.dump(issues_payload, f, indent=2)
 
+    append_execution_log(
+        log_path, 3, "action", "emit_issues completed",
+        payload={"issues_count": len(issues_payload), "issues_file": str(issues_file), "use_gh": use_gh},
+    )
     return [str(i["number"]) for i in issues_payload]

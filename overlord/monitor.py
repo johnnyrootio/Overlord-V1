@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from overlord.agents.multiclaude_dispatch import list_workspace_replies
+from overlord.multiclaude_recovery import is_repo_inited, multiclaude_daemon_status, multiclaude_repo_key
 
 
 @dataclass
@@ -20,7 +21,7 @@ class StatusSnapshot:
     workers: List[str] = field(default_factory=list)
     issues_in_progress: List[str] = field(default_factory=list)
     liveness: str = "unknown"
-    health: str = "unknown"  # e.g. "ok", "stub"
+    health: str = "unknown"  # "ok" | "daemon_down" | "repo_not_inited" | "stub"
     raw: Optional[str] = None
     active_workers: List[str] = field(default_factory=list)
     processes_summary: str = ""
@@ -29,6 +30,9 @@ class StatusSnapshot:
     default_agents: List[str] = field(default_factory=list)  # supervisor, merge-queue, default
     claude_processes: List[Dict[str, Any]] = field(default_factory=list)  # real only: {"pid","cpu","mem","agent"}
     worker_statuses: Dict[str, str] = field(default_factory=dict)  # name -> "running" | "finished" | "unknown"
+    daemon_status: str = "unknown"  # "running" | "stopped" | "unknown"
+    repo_inited: bool = False  # True if multiclaude has this repo tracked
+    multiclaude_error: Optional[str] = None  # e.g. "repo not inited" when repo_inited is False
 
 
 def format_snapshot_tables(snapshot: StatusSnapshot, repo_name: Optional[str] = None) -> str:
@@ -51,8 +55,14 @@ def format_snapshot_tables(snapshot: StatusSnapshot, repo_name: Optional[str] = 
 
     # --- 1) Summary ---
     lines.append("--- 1) Summary ---")
-    liv = (snapshot.liveness or "").strip()
+    daemon_status = getattr(snapshot, "daemon_status", "unknown")
+    repo_inited = getattr(snapshot, "repo_inited", False)
     lines.append(f"health: {snapshot.health}")
+    lines.append(f"daemon: {daemon_status}")
+    lines.append(f"repo_inited: {'yes' if repo_inited else 'no'}")
+    if getattr(snapshot, "multiclaude_error", None):
+        lines.append(f"multiclaude_error: {snapshot.multiclaude_error}")
+    liv = (snapshot.liveness or "").strip()
     lines.append(f"liveness: {liv}")
     lines.append("")
 
@@ -99,8 +109,14 @@ def format_snapshot_tables(snapshot: StatusSnapshot, repo_name: Optional[str] = 
     # --- 4) Recent file changes (worktrees) ---
     lines.append("--- 4) Recent file changes (worktrees) ---")
     if repo_changes:
-        for path in repo_changes:
+        n = len(repo_changes)
+        workers_list = ", ".join(active_workers) if active_workers else "—"
+        lines.append(f"  {n} file(s) in last 10 min (workers: {workers_list})")
+        sample = repo_changes[:10]
+        for path in sample:
             lines.append("  " + path)
+        if n > len(sample):
+            lines.append(f"  ... and {n - len(sample)} more")
     elif workers and snapshot.health == "ok":
         lines.append("  (no changes in last 10 min)")
     else:
@@ -122,12 +138,16 @@ def _tmux_session_for_repo(repo_name: str) -> str:
 
 
 def _worker_list_with_status(repo_name: str) -> Tuple[List[str], Dict[str, str]]:
-    """Run multiclaude worker list; return (worker names, name -> status)."""
+    """Run multiclaude worker list; return (worker names, name -> status).
+    repo_name can be owner/repo; multiclaude expects short name (multiclaude_repo_key)."""
     workers: List[str] = []
     statuses: Dict[str, str] = {}
+    mc_repo = multiclaude_repo_key(repo_name) if repo_name else ""
+    if not mc_repo:
+        return workers, statuses
     try:
         r = subprocess.run(
-            ["multiclaude", "worker", "list", "--repo", repo_name],
+            ["multiclaude", "worker", "list", "--repo", mc_repo],
             capture_output=True,
             text=True,
             timeout=10,
@@ -252,7 +272,8 @@ def _claude_processes_real() -> List[Dict[str, Any]]:
 def _active_workers_and_repo_changes(repo_name: str, recent_mins: int = 10) -> Tuple[List[str], List[str]]:
     """Worktrees with files modified in last recent_mins; return (active worker names, relative paths)."""
     root = _multiclaude_root()
-    wts = root / "wts" / repo_name
+    mc_repo = multiclaude_repo_key(repo_name) if repo_name else ""
+    wts = root / "wts" / mc_repo if mc_repo else root / "wts" / "__none__"
     if not wts.is_dir():
         return [], []
     active: List[str] = []
@@ -283,7 +304,8 @@ def _active_workers_and_repo_changes(repo_name: str, recent_mins: int = 10) -> T
 def _worktree_disk_mb(repo_name: str) -> int:
     """Total disk usage of worktrees for repo in MB."""
     root = _multiclaude_root()
-    wts = root / "wts" / repo_name
+    mc_repo = multiclaude_repo_key(repo_name) if repo_name else ""
+    wts = root / "wts" / mc_repo if mc_repo else root / "wts" / "__none__"
     if not wts.is_dir():
         return 0
     try:
@@ -322,6 +344,9 @@ def gather_status(
             raw=None,
         )
 
+    # Multiclaude health: daemon and repo inited (monitor must track and surface these)
+    daemon_status_val = multiclaude_daemon_status()
+    repo_inited_ok, multiclaude_err = is_repo_inited(repo_name)
     workers, worker_statuses = _worker_list_with_status(repo_name)
     default_agents = _default_agents(repo_name)
     active_workers, repo_changes = _active_workers_and_repo_changes(repo_name)
@@ -344,7 +369,15 @@ def gather_status(
     skip_prefixes = ("No workspace", "Path:", "Total:", "---", "(read error")
     issues_in_progress = [r for r in replies[:30] if r.strip() and not any(r.startswith(p) for p in skip_prefixes)]
 
-    health = "ok" if (workers or default_agents or process_count or issues_in_progress) else "stub"
+    # Health: ok only when daemon running and repo inited; otherwise surface daemon_down or repo_not_inited
+    if daemon_status_val != "running":
+        health = "daemon_down"
+    elif not repo_inited_ok:
+        health = "repo_not_inited"
+    elif workers or default_agents or process_count or issues_in_progress:
+        health = "ok"
+    else:
+        health = "stub"
 
     return StatusSnapshot(
         workers=workers,
@@ -359,6 +392,9 @@ def gather_status(
         default_agents=default_agents,
         claude_processes=claude_processes,
         worker_statuses=worker_statuses,
+        daemon_status=daemon_status_val,
+        repo_inited=repo_inited_ok,
+        multiclaude_error=multiclaude_err,
     )
 
 

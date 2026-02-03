@@ -91,6 +91,42 @@ def multiclaude_daemon_restart() -> Tuple[bool, str]:
     return True, "Daemon restarted."
 
 
+def multiclaude_repo_key(repo: str) -> str:
+    """Return the repo key multiclaude uses internally (for --repo, state, tmux).
+    Multiclaude keys repos by the short name (last path segment of URL), not owner/repo.
+    So owner/repo (e.g. johnnyrootio/trivial-todo-app) -> trivial-todo-app."""
+    if not (repo or "").strip():
+        return ""
+    s = repo.strip()
+    if "/" in s:
+        return s.split("/")[-1]
+    return s
+
+
+def is_repo_inited(repo: str) -> Tuple[bool, Optional[str]]:
+    """Check if multiclaude has this repo tracked (inited). repo = owner/repo (e.g. johnnyrootio/trivial-todo-app).
+    Returns (True, None) if inited, (False, error_message) if not inited or check failed.
+    Uses multiclaude_repo_key so we pass the same key multiclaude uses (short name)."""
+    if not (repo or "").strip() or "/" not in repo:
+        return False, "Repo must be owner/repo."
+    mc_repo = multiclaude_repo_key(repo)
+    if not mc_repo:
+        return False, "Repo must be owner/repo."
+    try:
+        r = subprocess.run(
+            ["multiclaude", "worker", "list", "--repo", mc_repo],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or "not found" in out.lower() or "configuration error" in out.lower():
+            return False, (r.stderr or r.stdout or "Repository not tracked.").strip() or "Repository not inited."
+        return True, None
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return False, str(e) if e else "multiclaude not available."
+
+
 def _multiclaude_repos_dir_for(repo_url: str) -> Optional[str]:
     """Path where multiclaude clones this repo: ~/.multiclaude/repos/<repo-name>. Repo name = last path segment of URL or owner/repo."""
     return get_multiclaude_repo_name(repo_url)
@@ -117,6 +153,11 @@ def _multiclaude_repo_clone_path(repo_url: str) -> Optional[str]:
         return None
     base = os.environ.get("MULTICLAUDE_HOME") or os.path.expanduser("~/.multiclaude")
     return os.path.join(base, "repos", repo_name)
+
+
+def get_multiclaude_repo_clone_path(repo_url: str) -> Optional[str]:
+    """Public: full path to multiclaude's clone for this repo, or None. Used so Phase 0 can run in repo cwd."""
+    return _multiclaude_repo_clone_path(repo_url)
 
 
 def multiclaude_remove_repo_clone(repo_url: str) -> bool:
@@ -221,12 +262,15 @@ def multiclaude_workers_remove_all(repo: str, accept_prompts: bool = True) -> Tu
         return 0, err
     if not workers:
         return 0, None
+    mc_repo = multiclaude_repo_key(repo) if repo else ""
+    if not mc_repo:
+        return 0, "Repo must be owner/repo or short name."
     stdin_input = b"y\n" if accept_prompts else None
     removed = 0
     for name in workers:
         try:
             r = subprocess.run(
-                ["multiclaude", "worker", "rm", name, "--repo", repo],
+                ["multiclaude", "worker", "rm", name, "--repo", mc_repo],
                 input=stdin_input,
                 capture_output=True,
                 text=True,
@@ -240,10 +284,14 @@ def multiclaude_workers_remove_all(repo: str, accept_prompts: bool = True) -> Tu
 
 
 def multiclaude_worker_list_with_status(repo: str) -> Tuple[List[str], Dict[str, str], Optional[str]]:
-    """Get worker names and status from multiclaude. Returns (workers, name->status, error)."""
+    """Get worker names and status from multiclaude. Returns (workers, name->status, error).
+    repo can be owner/repo; we pass multiclaude_repo_key(repo) to the CLI."""
+    mc_repo = multiclaude_repo_key(repo) if repo else ""
+    if not mc_repo:
+        return [], {}, "Repo must be owner/repo or short name."
     try:
         r = subprocess.run(
-            ["multiclaude", "worker", "list", "--repo", repo],
+            ["multiclaude", "worker", "list", "--repo", mc_repo],
             capture_output=True,
             text=True,
             timeout=10,
