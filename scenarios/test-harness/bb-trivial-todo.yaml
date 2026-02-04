@@ -1,0 +1,37 @@
+# Black box tests BB-1, BB-2, BB-3: trivial todo app.
+# Run from repo root:
+#   ./scripts/run-test-harness.sh scenarios/test-harness/bb-trivial-todo.yaml
+#   ./scripts/run-test-harness.sh scenarios/test-harness/bb-trivial-todo.yaml --no-repo
+# With real repo (BB-4): omit --no-repo; harness will create repo with unique name (base + run_id).
+#
+# Intent: The Test Harness seeks to develop the Trivial Todo App per the greenfield spec:
+#   - Minimal app: add todo (title), list all todos (title + done flag), mark todo as done (by id or index).
+#   - Single wave of work; in-memory OK; CLI or simple UI; check.sh runs and passes.
+#   - No persistence, auth, real-time sync, or mobile. The Claude Code agent should drive the
+#     conversation with Overlord using this intent so answers are concise and on-spec.
+#
+# Minimum requirements (drive agent replies and Overlord planning):
+#   - Functional: add todo, list todos, mark done.
+#   - Delivery: CLI or simple UI; check.sh passes.
+#   - Scope: single wave; minimal scope.
+#
+# Decisions: concrete choices the Test Harness has nailed down. The Claude Code agent
+# must guide Overlord toward these when Overlord asks (e.g. language, CLI library).
+#
+goals: "Build the minimal trivial todo app (add, list, mark done). Single wave; prefer concise answers."
+greenfield_spec: "../../greenfield-specs/trivial-todo-app.md"
+repo:
+  repo_name: "trivial-todo-app"
+repo_create: true
+timeout: 600
+success:
+  - "Workgraph complete"
+  - "Planning and execution ready"
+# Decisions the agent must steer Overlord toward (see black box plan §6.1).
+decisions:
+  language: "Python 3"
+  cli: "Use the click library for CLI"
+  interface: "CLI only (no web UI)"
+  storage: "In-memory only"
+  testing: "check.sh runs lint and tests"
+  repo_visibility: "public"

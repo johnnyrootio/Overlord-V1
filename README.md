@@ -43,6 +43,8 @@ You can also use your own virtual environment and run `pip install -e .`; the `o
 
 | Path | Description |
 |------|--------------|
+| **MAINTAINER.md** | Maintainer guide: issue-driven roadmap, where things live, GitHub labels, how to add features |
+| **roadmap/** | Roadmap, backlog, and feature specs for Overlord itself; see roadmap/README.md |
 | **docs/OVERLORD-AGENT-V1-SPEC.md** | Greenfield spec/requirements; Foundational Documents table and synthesis requirements |
 | **docs/DESIGN-AND-ARCHITECTURE.md** | Design and architecture; interfaces, state, graph, human-in-the-loop, roadmap |
 | **docs/SEQUENCE-PHASES-5-8.md** | Sequence diagram: Worker and Phases 5–8 (rendered: docs/sequence-phases-5-8-diagram.html) |
@@ -53,6 +55,7 @@ You can also use your own virtual environment and run `pip install -e .`; the `o
 | **scripts/** | Scripts used by Phase 4 and the design: `create-worker-with-auto-accept.sh`, `auto_accept_workers.sh`, `list-workspace-replies.sh`, `check-worker-status.sh` (stub) |
 | **greenfield-specs/** | Genesis spec format: README, template.md, example-todo-app.md |
 | **examples/** | Example genesis spec: robotic-barista-spec.md |
+| **docs/TEST-HARNESS.md** | How to run the Overlord Test Harness (autonomous runs, `--from-spec`, run dir, scenarios) |
 
 When developing from this bundle, treat **Palpatine** as `foundational/palpatine/` and **Overlord-Learnings** as `foundational/overlord-learnings/`. Phase 4 calls scripts as `./scripts/create-worker-with-auto-accept.sh`, `./scripts/check-worker-status.sh`, `./scripts/list-workspace-replies.sh` (paths relative to project root or as configured).
 

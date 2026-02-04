@@ -60,6 +60,7 @@ from overlord.slash_commands import (
     parse_slash_command,
     parse_slash_command_with_arg,
 )
+from overlord.test_io import AWAITING_INPUT_MARKER, TestSocketIO, start_test_socket_server
 
 
 def _echo_monitor_tables(snapshot: StatusSnapshot, repo_name: Optional[str] = None) -> None:
@@ -262,10 +263,59 @@ def _sync_state_from_result(state: SessionState, result: Dict[str, Any]) -> None
         state.repo_url = result["repo_url"]
 
 
+# Test-mode socket I/O: when set, _safe_input and stdout/stderr use the socket (see --test-socket).
+_test_io: Optional[Any] = None
+_test_io_stdout_save: Optional[Any] = None
+_test_io_stderr_save: Optional[Any] = None
+
+
+def _ensure_test_socket(addr: str) -> None:
+    """If --test-socket was used, listen, accept one connection, and use it for I/O. Idempotent."""
+    global _test_io, _test_io_stdout_save, _test_io_stderr_save
+    if _test_io is not None:
+        return
+    listener, resolved = start_test_socket_server(addr)
+    # So the Test Harness knows where to connect (e.g. when port was 0)
+    sys.stderr.write(f"OVERLORD_TEST_SOCKET_READY\t{resolved}\n")
+    sys.stderr.flush()
+    conn, _ = listener.accept()
+    listener.close()
+    _test_io = TestSocketIO(conn)
+    _test_io_stdout_save = sys.stdout
+    _test_io_stderr_save = sys.stderr
+
+    class _SocketWriter:
+        def __init__(self, io: TestSocketIO) -> None:
+            self._io = io
+
+        def write(self, data: str) -> int:
+            self._io.write(data)
+            return len(data)
+
+        def flush(self) -> None:
+            pass
+
+        def isatty(self) -> bool:
+            return False
+
+    sys.stdout = _SocketWriter(_test_io)
+    sys.stderr = _SocketWriter(_test_io)
+
+
 def _safe_input() -> str:
-    """Read a line from stdin. On EOF or Ctrl+C, re-prompt; never exit. Only returns when a line is read."""
+    """Read a line from stdin (or test socket when --test-socket). Emits AWAITING_INPUT marker before blocking."""
+    global _test_io
+    if _test_io is not None:
+        line = _test_io.read_line()
+        if not line:
+            return ""
+        return line.strip()
     while True:
         try:
+            # Emit marker when env set so scripts/harness can detect "waiting for input" (docs/AWAITING-INPUT-MARKER.md)
+            if os.environ.get("OVERLORD_TEST_HARNESS") == "1":
+                sys.stdout.write(AWAITING_INPUT_MARKER + "\n")
+                sys.stdout.flush()
             return input().strip()
         except EOFError:
             click.echo("(EOF received. Only /exit ends the session. Type /exit to quit.)", err=True)
@@ -745,6 +795,8 @@ def _run_phase4_execution_loop(
                     click.echo(reply)
                 except queue.Empty:
                     click.echo("(Reply timed out.)", err=True)
+            except Exception:
+                raise  # propagate to outer handler
     except Exception as e:  # never exit on error—stay in session
         click.echo(f"Error: {e}", err=True)
         click.echo("Staying in session. Type /exit to quit.", err=True)
@@ -754,9 +806,26 @@ def _run_phase4_execution_loop(
 
 
 @click.group()
-def cli() -> None:
+@click.option(
+    "--test-socket",
+    type=str,
+    default=None,
+    help="Bind address for test harness I/O (e.g. 127.0.0.1:0). Overlord uses the socket for input/output.",
+)
+def cli(test_socket: Optional[str]) -> None:
     """Overlord Agent V1 — stateful multi-agent CLI for greenfield development."""
-    pass
+    ctx = click.get_current_context()
+    ctx.obj = ctx.obj or {}
+    ctx.obj["test_socket"] = test_socket
+
+
+def _maybe_ensure_test_socket() -> None:
+    """If --test-socket was passed, start listener and accept one connection."""
+    ctx = click.get_current_context()
+    obj = (ctx.parent and ctx.parent.obj) or {}
+    addr = obj.get("test_socket")
+    if addr:
+        _ensure_test_socket(addr)
 
 
 @cli.command("start")
@@ -765,6 +834,7 @@ def cli() -> None:
 @click.option("--state-dir", type=click.Path(path_type=str), help="Override state root.")
 def start(spec_path: str, project_id: Optional[str], state_dir: Optional[str]) -> None:
     """Start a new greenfield project from a genesis spec, or continue an existing one."""
+    _maybe_ensure_test_socket()
     root = _state_dir(state_dir)
     pid = project_id if project_id else _project_id_from_spec(spec_path)
     manager = StateManager(root)
@@ -793,7 +863,7 @@ def start(spec_path: str, project_id: Optional[str], state_dir: Optional[str]) -
             click.echo(f"Project: {pid}  step={step_name(state.phase)}" + (f"  Repo: {state.repo_url}" if state.repo_url else ""))
             _session_idle_until_exit(pid)
             return
-        if sys.stdin.isatty():
+        if sys.stdin.isatty() or _test_io is not None:
             while state.pending_questions:
                 prompt = state.pending_questions[0]
                 click.echo("---")
@@ -854,7 +924,8 @@ def start(spec_path: str, project_id: Optional[str], state_dir: Optional[str]) -
     scripts_dir = _overlord_scripts_dir()
     # Interactive: ask repo, resolve, multiclaude init, Phase 0 graph, then Phase 1.
     # Retry loop so we never exit on error—only /exit can end the session.
-    if sys.stdin.isatty():
+    # When --test-socket is used, run interactive loop even if stdin is not a TTY.
+    if sys.stdin.isatty() or _test_io is not None:
         while True:
             if not state.pending_questions:
                 state.add_pending_question(REPO_QUESTION)
@@ -1112,6 +1183,7 @@ def _read_answer(
 @click.option("--responses", type=click.Path(path_type=str), help="Canned responses file.")
 def run(project_id: str, state_dir: Optional[str], responses: Optional[str]) -> None:
     """Attach to an existing project and continue execution."""
+    _maybe_ensure_test_socket()
     root = _state_dir(state_dir)
     manager = StateManager(root)
     try:
@@ -1292,6 +1364,7 @@ def resume(project_id: str, state_dir: Optional[str], responses: Optional[str]) 
 @click.option("--state-dir", type=click.Path(path_type=str), help="Override state root.")
 def scenario_cmd(scenario_path: str, state_dir: Optional[str]) -> None:
     """Run a scripted scenario (YAML: spec_path, gate_responses). Start then resume with responses."""
+    _maybe_ensure_test_socket()
     root = _state_dir(state_dir)
     data = load_scenario(scenario_path)
     spec_path = data["spec_path"]
